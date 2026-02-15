@@ -5,6 +5,7 @@ import logging
 import sys
 import stat
 import aiohttp
+import re  # <--- Added regex for smarter parsing
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from dotenv import load_dotenv
@@ -17,7 +18,6 @@ load_dotenv()
 def get_env_list(var_name, default=[]):
     val = os.getenv(var_name)
     if val:
-        # Splits "123, 456, 789" into [123, 456, 789]
         return [int(x.strip()) for x in val.split(',') if x.strip().lstrip("-").isdigit()]
     return default
 
@@ -32,8 +32,7 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = get_env_int("PORT", 8000)
 
-# Admins and Channels
-ADMIN_IDS = get_env_list("ADMIN_IDS") # New: List of Admin IDs
+ADMIN_IDS = get_env_list("ADMIN_IDS")
 MAIN_CHANNEL = get_env_int("MAIN_CHANNEL")
 DB_CHANNEL = get_env_int("DB_CHANNEL")
 
@@ -49,10 +48,9 @@ app = Client("anime_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- HELPER: Admin Check ---
 async def is_admin(message: Message):
-    if not ADMIN_IDS:
-        return True # If no admins set, allow everyone (or change to False to lock it)
+    if not ADMIN_IDS: return True
     if message.from_user.id not in ADMIN_IDS:
-        await message.reply_text("⛔ **Access Denied.** You are not an admin.")
+        await message.reply_text("⛔ **Access Denied.**")
         return False
     return True
 
@@ -103,18 +101,16 @@ async def start(client, message):
 
     status_text = "👋 **Bot is Online!**\n\n"
     
-    # Check Main Channel
     try:
         chat = await client.get_chat(MAIN_CHANNEL)
         status_text += f"✅ **Main Channel:** `{chat.title}`\n"
-    except Exception:
+    except:
         status_text += "⚠️ **Main Channel:** Not recognized. Forward a message from it to me!\n"
 
-    # Check DB Channel
     try:
         chat = await client.get_chat(DB_CHANNEL)
         status_text += f"✅ **DB Channel:** `{chat.title}`\n"
-    except Exception:
+    except:
         status_text += "⚠️ **DB Channel:** Not recognized. Forward a message from it to me!\n"
 
     status_text += "\n**Commands:**\n/anime <name> -e <ep> -r <res>\n/restart - Restart bot"
@@ -137,15 +133,14 @@ async def set_channels_via_forward(client, message: Message):
         chat_id = message.forward_from_chat.id
         title = message.forward_from_chat.title
         
-        # Ask user which channel this is
         text = (
-            f"📢 **Detected Channel:** {title} (`{chat_id}`)\n\n"
+            f"📢 **Detected Channel:** {title} ({chat_id})\n\n"
             "What do you want to set this as?\n"
             "Reply with **'main'** or **'db'**."
         )
         await message.reply_text(text, quote=True)
     else:
-        await message.reply_text("❌ Could not detect channel ID. Make sure it is a public channel or I am admin there.")
+        await message.reply_text("❌ Could not detect channel ID.")
 
 @app.on_message(filters.reply & filters.text & filters.private)
 async def confirm_channel_set(client, message: Message):
@@ -153,27 +148,29 @@ async def confirm_channel_set(client, message: Message):
     
     global MAIN_CHANNEL, DB_CHANNEL
     
-    # Check if replying to a channel detection message
     reply = message.reply_to_message
     if not reply or "Detected Channel" not in reply.text:
         return
 
-    # Extract ID from the previous message
-    try:
-        # Simple extraction assumes format: ... (`-10012345`)
-        extracted_id = int(reply.text.split('(`')[1].split('`)')[0])
-    except:
-        await message.reply_text("❌ Error parsing ID.")
+    # --- FIX: Robust Regex Parsing ---
+    # Looks for any pattern starting with -100 followed by numbers inside parentheses
+    match = re.search(r"\((-100\d+)\)", reply.text)
+    
+    if match:
+        extracted_id = int(match.group(1))
+    else:
+        await message.reply_text("❌ Error: Could not find a valid Channel ID in the message.")
         return
 
-    choice = message.text.lower().strip()
+    # Clean up user input (remove quotes like 'db' -> db)
+    choice = message.text.lower().replace("'", "").replace('"', "").strip()
     
     if choice == "main":
         MAIN_CHANNEL = extracted_id
-        await message.reply_text(f"✅ **Main Channel** set to `{extracted_id}` temporarily.")
+        await message.reply_text(f"✅ **Main Channel** set to `{extracted_id}`.")
     elif choice == "db":
         DB_CHANNEL = extracted_id
-        await message.reply_text(f"✅ **DB Channel** set to `{extracted_id}` temporarily.")
+        await message.reply_text(f"✅ **DB Channel** set to `{extracted_id}`.")
     else:
         await message.reply_text("❌ Invalid choice. Reply 'main' or 'db'.")
 
@@ -182,7 +179,7 @@ async def anime_download(client, message: Message):
     if not await is_admin(message): return
     
     if not MAIN_CHANNEL or not DB_CHANNEL:
-        await message.reply_text("⚠️ **Error:** Channels not set. Forward a message from your channels to me first!")
+        await message.reply_text("⚠️ **Error:** Channels not set. Forward messages to me first!")
         return
 
     command_text = message.text.split(" ", 1)
@@ -203,10 +200,7 @@ async def anime_download(client, message: Message):
         episode = rest[0].strip()
         resolution_arg = rest[1].strip()
 
-        if resolution_arg.lower() == "all":
-            resolutions = ["360", "720", "1080"]
-        else:
-            resolutions = [resolution_arg]
+        resolutions = ["360", "720", "1080"] if resolution_arg.lower() == "all" else [resolution_arg]
 
         status_msg = await message.reply_text(f"🔍 Searching info for **{anime_name}**...")
 
@@ -218,7 +212,7 @@ async def anime_download(client, message: Message):
                 await app.send_photo(DB_CHANNEL, photo=image_url, caption=caption)
                 await status_msg.edit_text(f"✅ Info Post Sent.\nQueueing **{anime_name}** Episode **{episode}**...")
             except Exception as e:
-                await message.reply_text(f"⚠️ Error posting info to channels: {e}\n(Did you introduce the channels?)")
+                await message.reply_text(f"⚠️ Error posting to channels: {e}\n(Try forwarding channel messages again!)")
                 return
         else:
             await status_msg.edit_text(f"⚠️ Info not found, downloading video only...")
@@ -235,7 +229,6 @@ async def anime_download(client, message: Message):
         for res in resolutions:
             await status_msg.edit_text(f"Processing **{anime_name}** - Episode {episode} [{res}p]...")
             
-            # Safe Mode (-t 1)
             cmd = f"./animepahe-dl.sh -d -t 1 -a '{anime_name}' -e {episode} -r {res}"
             logger.info(f"Executing: {cmd}")
             
@@ -248,9 +241,7 @@ async def anime_download(client, message: Message):
             while True:
                 line = await process.stdout.readline()
                 if not line: break
-                decoded_line = line.decode('utf-8', errors='ignore').strip()
-                if decoded_line:
-                    print(f"[SCRIPT] {decoded_line}")
+                print(f"[SCRIPT] {line.decode('utf-8', errors='ignore').strip()}")
 
             await process.wait()
             
@@ -265,16 +256,12 @@ async def anime_download(client, message: Message):
             
             latest_file = max(files, key=os.path.getctime)
             
-            # Rename
             safe_name = anime_name.replace(" ", "_").replace(":", "").replace("/", "")
             final_filename = f"Ep_{episode}_{safe_name}_{res}p.mp4"
             new_file_path = os.path.join(os.path.dirname(latest_file), final_filename)
-            try:
-                os.rename(latest_file, new_file_path)
-            except OSError:
-                new_file_path = latest_file
+            try: os.rename(latest_file, new_file_path)
+            except: new_file_path = latest_file
 
-            # Upload
             await status_msg.edit_text(f"Uploading {final_filename}...")
             try:
                 sent_msg = await app.send_document(
@@ -288,21 +275,16 @@ async def anime_download(client, message: Message):
             except Exception as e:
                 await message.reply_text(f"⚠️ Upload Error: {e}")
 
-            # Cleanup
             try:
                 os.remove(new_file_path)
                 parent_dir = os.path.dirname(new_file_path)
-                if not os.listdir(parent_dir):
-                    os.rmdir(parent_dir)
-            except Exception:
-                pass
+                if not os.listdir(parent_dir): os.rmdir(parent_dir)
+            except: pass
 
-            # Cool Down
             if res != resolutions[-1]:
                 await status_msg.edit_text(f"❄️ Cooling down for 30s...")
                 await asyncio.sleep(30)
 
-        # 4. Finish
         if success_count == len(resolutions):
             await status_msg.edit_text("✅ All done! Download successful.")
             await message.reply_sticker("CAACAgUAAxkBAAEQJ6hpV0JDpDDOI68yH7lV879XbIWiFwACGAADQ3PJEs4sW1y9vZX3OAQ")
