@@ -6,7 +6,7 @@ import sys
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from dotenv import load_dotenv
-from aiohttp import web  # We need this for the dummy server
+from aiohttp import web
 
 # Load environment variables
 load_dotenv()
@@ -23,7 +23,7 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL = get_env_int("MAIN_CHANNEL")
 DB_CHANNEL = get_env_int("DB_CHANNEL")
-PORT = get_env_int("PORT", 8000) # Default to 8000 for Koyeb
+PORT = get_env_int("PORT", 8000)
 
 # Setup Logging
 logging.basicConfig(
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 app = Client("anime_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --- DUMMY WEB SERVER (Fixes Koyeb Health Check) ---
+# --- DUMMY WEB SERVER ---
 async def web_server():
     async def handle(request):
         return web.Response(text="Bot is running!")
@@ -102,7 +102,9 @@ async def anime_download(client, message: Message):
         for res in resolutions:
             await status_msg.edit_text(f"Processing **{anime_name}** - Episode {episode} [{res}p]...")
             
-            cmd = f"./animepahe-dl.sh -d -a '{anime_name}' -e {episode} -r {res}"
+            # --- FIXED COMMAND: Added -t 8 to force manual download mode ---
+            # This makes the script use curl (which we patched) instead of ffmpeg for downloading
+            cmd = f"./animepahe-dl.sh -d -t 8 -a '{anime_name}' -e {episode} -r {res}"
             
             process = await asyncio.create_subprocess_shell(
                 cmd,
@@ -113,12 +115,17 @@ async def anime_download(client, message: Message):
             while True:
                 line = await process.stdout.readline()
                 if not line: break
-                print(f"[SCRIPT] {line.decode().strip()}")
+                decoded_line = line.decode().strip()
+                print(f"[SCRIPT] {decoded_line}")
+                
+                # Check for the specific key error to warn the user
+                if "HTTP error 403 Forbidden" in decoded_line:
+                    await message.reply_text(f"⚠️ Warning: 403 Error detected on {res}p. Retrying might not help.")
 
             await process.wait()
             
             if process.returncode != 0:
-                await message.reply_text(f"Failed to download {res}p. It might be blocked by the server.")
+                await message.reply_text(f"Failed to download {res}p. Check logs for 403 errors.")
                 continue
 
             files = glob.glob("**/*.mp4", recursive=True)
@@ -128,7 +135,7 @@ async def anime_download(client, message: Message):
             
             latest_file = max(files, key=os.path.getctime)
             
-            # Renaming
+            # Rename
             safe_name = anime_name.replace(" ", "_").replace(":", "").replace("/", "")
             final_filename = f"Ep_{episode}_{safe_name}_{res}p.mp4"
             new_file_path = os.path.join(os.path.dirname(latest_file), final_filename)
@@ -164,7 +171,6 @@ async def anime_download(client, message: Message):
 
 if __name__ == "__main__":
     print("Bot Starting...")
-    # Start the web server and the bot together
     loop = asyncio.get_event_loop()
     loop.create_task(web_server())
     app.run()
