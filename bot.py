@@ -3,6 +3,7 @@ import glob
 import asyncio
 import logging
 import sys
+import stat
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from dotenv import load_dotenv
@@ -99,12 +100,23 @@ async def anime_download(client, message: Message):
 
         status_msg = await message.reply_text(f"Queueing **{anime_name}** Episode **{episode}**...")
 
+        # --- SELF-REPAIR: Ensure script is executable ---
+        script_path = "./animepahe-dl.sh"
+        if os.path.exists(script_path):
+            st = os.stat(script_path)
+            os.chmod(script_path, st.st_mode | stat.S_IEXEC)
+        else:
+            await message.reply_text("❌ Critical Error: animepahe-dl.sh not found!")
+            return
+
+        success_count = 0
+
         for res in resolutions:
             await status_msg.edit_text(f"Processing **{anime_name}** - Episode {episode} [{res}p]...")
             
-            # --- FIXED COMMAND: Added -t 8 to force manual download mode ---
-            # This makes the script use curl (which we patched) instead of ffmpeg for downloading
-            cmd = f"./animepahe-dl.sh -d -t  -a '{anime_name}' -e {episode} -r {res}"
+            # --- SAFE MODE: -t 1 (Single Thread) to prevent crashes ---
+            cmd = f"./animepahe-dl.sh -d -t 1 -a '{anime_name}' -e {episode} -r {res}"
+            logger.info(f"Executing: {cmd}")
             
             process = await asyncio.create_subprocess_shell(
                 cmd,
@@ -112,25 +124,24 @@ async def anime_download(client, message: Message):
                 stderr=asyncio.subprocess.STDOUT 
             )
 
+            # Capture logs
             while True:
                 line = await process.stdout.readline()
                 if not line: break
-                decoded_line = line.decode().strip()
-                print(f"[SCRIPT] {decoded_line}")
-                
-                # Check for the specific key error to warn the user
-                if "HTTP error 403 Forbidden" in decoded_line:
-                    await message.reply_text(f"⚠️ Warning: 403 Error detected on {res}p. Retrying might not help.")
+                decoded_line = line.decode('utf-8', errors='ignore').strip()
+                if decoded_line:
+                    print(f"[SCRIPT] {decoded_line}")
 
             await process.wait()
             
             if process.returncode != 0:
-                await message.reply_text(f"Failed to download {res}p. Check logs for 403 errors.")
+                await message.reply_text(f"❌ Failed to download {res}p. (Exit Code: {process.returncode})")
                 continue
 
+            # Find the downloaded file
             files = glob.glob("**/*.mp4", recursive=True)
             if not files:
-                await message.reply_text(f"Download completed but file not found for {res}p.")
+                await message.reply_text(f"❌ Download seemingly finished, but file not found for {res}p.")
                 continue
             
             latest_file = max(files, key=os.path.getctime)
@@ -146,24 +157,31 @@ async def anime_download(client, message: Message):
 
             # Upload
             await status_msg.edit_text(f"Uploading {final_filename}...")
-            sent_msg = await app.send_document(
-                chat_id=MAIN_CHANNEL,
-                document=new_file_path,
-                caption=final_filename,
-                force_document=True
-            )
             try:
+                sent_msg = await app.send_document(
+                    chat_id=MAIN_CHANNEL,
+                    document=new_file_path,
+                    caption=final_filename,
+                    force_document=True
+                )
                 await sent_msg.copy(chat_id=DB_CHANNEL)
+                success_count += 1
             except Exception as e:
-                await message.reply_text(f"⚠️ Failed to forward: {e}")
+                await message.reply_text(f"⚠️ Upload Failed: {e}")
 
             # Cleanup
-            os.remove(new_file_path)
-            parent_dir = os.path.dirname(new_file_path)
-            if not os.listdir(parent_dir):
-                os.rmdir(parent_dir)
+            try:
+                os.remove(new_file_path)
+                parent_dir = os.path.dirname(new_file_path)
+                if not os.listdir(parent_dir):
+                    os.rmdir(parent_dir)
+            except Exception:
+                pass
 
-        await status_msg.edit_text("All done!")
+        if success_count == len(resolutions):
+            await status_msg.edit_text("✅ All done! Download successful.")
+        else:
+            await status_msg.edit_text(f"⚠️ Job finished. {success_count}/{len(resolutions)} successful.")
 
     except Exception as e:
         logger.error(f"Error: {e}")
