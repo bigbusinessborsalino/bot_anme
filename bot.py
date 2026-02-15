@@ -5,7 +5,7 @@ import logging
 import sys
 import stat
 import aiohttp
-import re  # <--- Added regex for smarter parsing
+import re
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from dotenv import load_dotenv
@@ -36,6 +36,9 @@ ADMIN_IDS = get_env_list("ADMIN_IDS")
 MAIN_CHANNEL = get_env_int("MAIN_CHANNEL")
 DB_CHANNEL = get_env_int("DB_CHANNEL")
 
+# Sticker ID to send after 1080p
+STICKER_ID = "CAACAgUAAxkBAAEQJ6hpV0JDpDDOI68yH7lV879XbIWiFwACGAADQ3PJEs4sW1y9vZX3OAQ"
+
 # Setup Logging
 logging.basicConfig(
     level=logging.INFO,
@@ -50,7 +53,6 @@ app = Client("anime_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 async def is_admin(message: Message):
     if not ADMIN_IDS: return True
     if message.from_user.id not in ADMIN_IDS:
-        await message.reply_text("⛔ **Access Denied.**")
         return False
     return True
 
@@ -152,17 +154,13 @@ async def confirm_channel_set(client, message: Message):
     if not reply or "Detected Channel" not in reply.text:
         return
 
-    # --- FIX: Robust Regex Parsing ---
-    # Looks for any pattern starting with -100 followed by numbers inside parentheses
     match = re.search(r"\((-100\d+)\)", reply.text)
-    
     if match:
         extracted_id = int(match.group(1))
     else:
         await message.reply_text("❌ Error: Could not find a valid Channel ID in the message.")
         return
 
-    # Clean up user input (remove quotes like 'db' -> db)
     choice = message.text.lower().replace("'", "").replace('"', "").strip()
     
     if choice == "main":
@@ -204,18 +202,19 @@ async def anime_download(client, message: Message):
 
         status_msg = await message.reply_text(f"🔍 Searching info for **{anime_name}**...")
 
-        # 1. Info Post
+        # 1. Info Post (MAIN CHANNEL ONLY)
         caption, image_url = await get_anime_info(anime_name)
         if caption and image_url:
             try:
+                # Only sending to Main Channel
                 await app.send_photo(MAIN_CHANNEL, photo=image_url, caption=caption)
-                await app.send_photo(DB_CHANNEL, photo=image_url, caption=caption)
-                await status_msg.edit_text(f"✅ Info Post Sent.\nQueueing **{anime_name}** Episode **{episode}**...")
+                # Reduced updates: Only update status once here
+                await status_msg.edit_text(f"✅ Info Found. Starting Downloads for Ep **{episode}**...")
             except Exception as e:
-                await message.reply_text(f"⚠️ Error posting to channels: {e}\n(Try forwarding channel messages again!)")
+                await message.reply_text(f"⚠️ Error posting to Main Channel: {e}")
                 return
         else:
-            await status_msg.edit_text(f"⚠️ Info not found, downloading video only...")
+            await status_msg.edit_text(f"⚠️ Info not found, starting downloads anyway...")
 
         # 2. Self Repair
         script_path = "./animepahe-dl.sh"
@@ -227,7 +226,7 @@ async def anime_download(client, message: Message):
 
         # 3. Download Loop
         for res in resolutions:
-            await status_msg.edit_text(f"Processing **{anime_name}** - Episode {episode} [{res}p]...")
+            # We do NOT edit the status message here to save API calls
             
             cmd = f"./animepahe-dl.sh -d -t 1 -a '{anime_name}' -e {episode} -r {res}"
             logger.info(f"Executing: {cmd}")
@@ -238,15 +237,15 @@ async def anime_download(client, message: Message):
                 stderr=asyncio.subprocess.STDOUT 
             )
 
+            # Consume logs silently to keep buffer clear
             while True:
                 line = await process.stdout.readline()
                 if not line: break
-                print(f"[SCRIPT] {line.decode('utf-8', errors='ignore').strip()}")
 
             await process.wait()
             
             if process.returncode != 0:
-                await message.reply_text(f"❌ Failed to download {res}p. (Exit Code: {process.returncode})")
+                await message.reply_text(f"❌ Failed to download {res}p.")
                 continue
 
             files = glob.glob("**/*.mp4", recursive=True)
@@ -256,13 +255,14 @@ async def anime_download(client, message: Message):
             
             latest_file = max(files, key=os.path.getctime)
             
+            # Rename
             safe_name = anime_name.replace(" ", "_").replace(":", "").replace("/", "")
             final_filename = f"Ep_{episode}_{safe_name}_{res}p.mp4"
             new_file_path = os.path.join(os.path.dirname(latest_file), final_filename)
             try: os.rename(latest_file, new_file_path)
             except: new_file_path = latest_file
 
-            await status_msg.edit_text(f"Uploading {final_filename}...")
+            # Upload to Main Channel
             try:
                 sent_msg = await app.send_document(
                     chat_id=MAIN_CHANNEL,
@@ -270,26 +270,33 @@ async def anime_download(client, message: Message):
                     caption=final_filename,
                     force_document=True
                 )
+                # Copy to DB Channel
                 await sent_msg.copy(chat_id=DB_CHANNEL)
+                
+                # Check for 1080p Sticker Trigger
+                if "1080" in res:
+                    await app.send_sticker(MAIN_CHANNEL, STICKER_ID)
+                
                 success_count += 1
             except Exception as e:
-                await message.reply_text(f"⚠️ Upload Error: {e}")
+                await message.reply_text(f"⚠️ Upload Error ({res}p): {e}")
 
+            # Cleanup
             try:
                 os.remove(new_file_path)
                 parent_dir = os.path.dirname(new_file_path)
                 if not os.listdir(parent_dir): os.rmdir(parent_dir)
             except: pass
 
+            # Cool Down (Internal wait, no message edit)
             if res != resolutions[-1]:
-                await status_msg.edit_text(f"❄️ Cooling down for 30s...")
                 await asyncio.sleep(30)
 
+        # 4. Finish
         if success_count == len(resolutions):
-            await status_msg.edit_text("✅ All done! Download successful.")
-            await message.reply_sticker("CAACAgUAAxkBAAEQJ6hpV0JDpDDOI68yH7lV879XbIWiFwACGAADQ3PJEs4sW1y9vZX3OAQ")
+            await status_msg.edit_text("✅ All done!")
         else:
-            await status_msg.edit_text(f"⚠️ Job finished. {success_count}/{len(resolutions)} successful.")
+            await status_msg.edit_text(f"⚠️ Done. {success_count}/{len(resolutions)} successful.")
 
     except Exception as e:
         logger.error(f"Error: {e}")
