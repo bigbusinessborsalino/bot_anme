@@ -117,8 +117,14 @@ command_not_found() {
 }
 
 get() {
-    # $1: url
-    "$_CURL" -sS -L "$1" -H "cookie: $_COOKIE" --compressed
+    # $1: url
+    # We added a fake User-Agent to try and trick the server
+    "$_CURL" -sS -L "$1" \
+        -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+        -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8" \
+        -H "Accept-Language: en-US,en;q=0.5" \
+        -H "cookie: $_COOKIE" \
+        --compressed
 }
 
 set_cookie() {
