@@ -294,7 +294,8 @@ download_file() {
     # $1: URL link
     # $2: output file
     local s
-    # Updated to use curl_req (with User Agent)
+    # Uses curl_req which includes User-Agent. 
+    # CRITICAL: -H "Referer: ..." is required by Kwik
     s=$(curl_req -k -sS -H "Referer: $_REFERER_URL" -H "cookie: $_COOKIE" -C - "$1" -L -g -o "$2" \
         --connect-timeout 5 \
         --compressed \
