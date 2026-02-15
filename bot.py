@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sys
 import stat
+import aiohttp
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from dotenv import load_dotenv
@@ -35,6 +36,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Client("anime_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# --- Jikan API Helper ---
+async def get_anime_info(anime_name):
+    url = f"https://api.jikan.moe/v4/anime?q={anime_name}&limit=1"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            if response.status == 200:
+                data = await response.json()
+                if data['data']:
+                    anime = data['data'][0]
+                    title = anime.get('title_english') or anime.get('title')
+                    genres = ", ".join([g['name'] for g in anime.get('genres', [])])
+                    status = anime.get('status', 'Unknown')
+                    image_url = anime['images']['jpg']['large_image_url']
+                    # Create a hashtag from the title (remove spaces/symbols)
+                    hashtag = "".join(x for x in title if x.isalnum())
+                    
+                    caption = (
+                        f"**{title}**\n\n"
+                        f"➜ **Genres:** {genres}\n"
+                        f"➜ **Status:** {status}\n\n"
+                        f"#{hashtag}"
+                    )
+                    return caption, image_url
+    return None, None
 
 # --- DUMMY WEB SERVER ---
 async def web_server():
@@ -96,25 +122,38 @@ async def anime_download(client, message: Message):
         episode = rest[0].strip()
         resolution_arg = rest[1].strip()
 
-        resolutions = ["360", "720", "1080"] if resolution_arg.lower() == "all" else [resolution_arg]
+        # Resolution Order: 360 -> 720 -> 1080
+        if resolution_arg.lower() == "all":
+            resolutions = ["360", "720", "1080"]
+        else:
+            resolutions = [resolution_arg]
 
-        status_msg = await message.reply_text(f"Queueing **{anime_name}** Episode **{episode}**...")
+        status_msg = await message.reply_text(f"🔍 Searching info for **{anime_name}**...")
 
-        # --- SELF-REPAIR: Ensure script is executable ---
+        # --- 1. SEND INFO POST ---
+        caption, image_url = await get_anime_info(anime_name)
+        if caption and image_url:
+            # Send to Main Channel
+            await app.send_photo(MAIN_CHANNEL, photo=image_url, caption=caption)
+            # Send to DB Channel
+            await app.send_photo(DB_CHANNEL, photo=image_url, caption=caption)
+            await status_msg.edit_text(f"✅ Info Post Sent.\nQueueing **{anime_name}** Episode **{episode}**...")
+        else:
+            await status_msg.edit_text(f"⚠️ Could not find info for {anime_name}, proceeding with download only...")
+
+        # --- SELF-REPAIR ---
         script_path = "./animepahe-dl.sh"
         if os.path.exists(script_path):
             st = os.stat(script_path)
             os.chmod(script_path, st.st_mode | stat.S_IEXEC)
-        else:
-            await message.reply_text("❌ Critical Error: animepahe-dl.sh not found!")
-            return
 
         success_count = 0
 
+        # --- 2. DOWNLOAD LOOP ---
         for res in resolutions:
             await status_msg.edit_text(f"Processing **{anime_name}** - Episode {episode} [{res}p]...")
             
-            # --- SAFE MODE: -t 1 (Single Thread) to prevent crashes ---
+            # Use -t 1 (Safe Mode) to keep RAM usage low
             cmd = f"./animepahe-dl.sh -d -t 1 -a '{anime_name}' -e {episode} -r {res}"
             logger.info(f"Executing: {cmd}")
             
@@ -124,7 +163,7 @@ async def anime_download(client, message: Message):
                 stderr=asyncio.subprocess.STDOUT 
             )
 
-            # Capture logs
+            # Log streaming (optional, keeps Koyeb alive)
             while True:
                 line = await process.stdout.readline()
                 if not line: break
@@ -138,10 +177,9 @@ async def anime_download(client, message: Message):
                 await message.reply_text(f"❌ Failed to download {res}p. (Exit Code: {process.returncode})")
                 continue
 
-            # Find the downloaded file
             files = glob.glob("**/*.mp4", recursive=True)
             if not files:
-                await message.reply_text(f"❌ Download seemingly finished, but file not found for {res}p.")
+                await message.reply_text(f"❌ File not found for {res}p.")
                 continue
             
             latest_file = max(files, key=os.path.getctime)
@@ -178,8 +216,16 @@ async def anime_download(client, message: Message):
             except Exception:
                 pass
 
+            # --- 3. COOL DOWN (30 Seconds) ---
+            if res != resolutions[-1]: # Don't wait after the very last one
+                await status_msg.edit_text(f"❄️ Cooling down for 30s to save memory...")
+                await asyncio.sleep(30)
+
+        # --- 4. FINAL STATUS & STICKER ---
         if success_count == len(resolutions):
             await status_msg.edit_text("✅ All done! Download successful.")
+            # Send the sticker only if all downloads worked (or at least one worked)
+            await message.reply_sticker("CAACAgUAAxkBAAEQJ6hpV0JDpDDOI68yH7lV879XbIWiFwACGAADQ3PJEs4sW1y9vZX3OAQ")
         else:
             await status_msg.edit_text(f"⚠️ Job finished. {success_count}/{len(resolutions)} successful.")
 
