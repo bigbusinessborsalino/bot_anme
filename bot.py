@@ -104,7 +104,7 @@ async def anime_download(client, message: Message):
             
             # --- FIXED COMMAND: Added -t 8 to force manual download mode ---
             # This makes the script use curl (which we patched) instead of ffmpeg for downloading
-            cmd = f"./animepahe-dl.sh -d -t 8 -a '{anime_name}' -e {episode} -r {res}"
+            cmd = f"./animepahe-dl.sh -d -t  -a '{anime_name}' -e {episode} -r {res}"
             
             process = await asyncio.create_subprocess_shell(
                 cmd,
