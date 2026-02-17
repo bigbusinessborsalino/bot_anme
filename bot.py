@@ -35,28 +35,18 @@ PORT = get_env_int("PORT", 8000)
 ADMIN_IDS = get_env_list("ADMIN_IDS")
 MAIN_CHANNEL = get_env_int("MAIN_CHANNEL")
 DB_CHANNEL = get_env_int("DB_CHANNEL")
-
-# Sticker ID to send after 1080p
 STICKER_ID = "CAACAgUAAxkBAAEQJ6hpV0JDpDDOI68yH7lV879XbIWiFwACGAADQ3PJEs4sW1y9vZX3OAQ"
 
-# Setup Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger(__name__)
 
 app = Client("anime_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --- HELPER: Admin Check ---
 async def is_admin(message: Message):
     if not ADMIN_IDS: return True
-    if message.from_user.id not in ADMIN_IDS:
-        return False
+    if message.from_user.id not in ADMIN_IDS: return False
     return True
 
-# --- HELPER: Jikan API ---
 async def get_anime_info(anime_name):
     url = f"https://api.jikan.moe/v4/anime?q={anime_name}&limit=1"
     async with aiohttp.ClientSession() as session:
@@ -71,22 +61,13 @@ async def get_anime_info(anime_name):
                         status = anime.get('status', 'Unknown')
                         image_url = anime['images']['jpg']['large_image_url']
                         hashtag = "".join(x for x in title if x.isalnum())
-                        
-                        caption = (
-                            f"**{title}**\n\n"
-                            f"➜ **Genres:** {genres}\n"
-                            f"➜ **Status:** {status}\n\n"
-                            f"#{hashtag}"
-                        )
+                        caption = f"**{title}**\n\n➜ **Genres:** {genres}\n➜ **Status:** {status}\n\n#{hashtag}"
                         return caption, image_url
-        except Exception as e:
-            logger.error(f"API Error: {e}")
+        except Exception as e: logger.error(f"API Error: {e}")
     return None, None
 
-# --- DUMMY WEB SERVER ---
 async def web_server():
-    async def handle(request):
-        return web.Response(text="Bot is running!")
+    async def handle(request): return web.Response(text="Bot is running!")
     server = web.Application()
     server.router.add_get("/", handle)
     runner = web.AppRunner(server)
@@ -95,215 +76,104 @@ async def web_server():
     await site.start()
     logger.info(f"Web server started on port {PORT}")
 
-# --- COMMANDS ---
-
 @app.on_message(filters.command("start"))
 async def start(client, message):
     if not await is_admin(message): return
-
-    status_text = "👋 **Bot is Online!**\n\n"
-    
-    try:
-        chat = await client.get_chat(MAIN_CHANNEL)
-        status_text += f"✅ **Main Channel:** `{chat.title}`\n"
-    except:
-        status_text += "⚠️ **Main Channel:** Not recognized. Forward a message from it to me!\n"
-
-    try:
-        chat = await client.get_chat(DB_CHANNEL)
-        status_text += f"✅ **DB Channel:** `{chat.title}`\n"
-    except:
-        status_text += "⚠️ **DB Channel:** Not recognized. Forward a message from it to me!\n"
-
-    status_text += "\n**Commands:**\n/anime <name> -e <ep> -r <res>\n/restart - Restart bot"
-    await message.reply_text(status_text)
-
-@app.on_message(filters.command("restart"))
-async def restart_bot(client, message):
-    if not await is_admin(message): return
-    await message.reply_text("🔄 **Restarting...**")
-    os.execl(sys.executable, sys.executable, *sys.argv)
-
-# --- CHANNEL SETUP VIA FORWARD ---
-@app.on_message(filters.forwarded & filters.private)
-async def set_channels_via_forward(client, message: Message):
-    if not await is_admin(message): return
-    
-    global MAIN_CHANNEL, DB_CHANNEL
-    
-    if message.forward_from_chat:
-        chat_id = message.forward_from_chat.id
-        title = message.forward_from_chat.title
-        
-        text = (
-            f"📢 **Detected Channel:** {title} ({chat_id})\n\n"
-            "What do you want to set this as?\n"
-            "Reply with **'main'** or **'db'**."
-        )
-        await message.reply_text(text, quote=True)
-    else:
-        await message.reply_text("❌ Could not detect channel ID.")
-
-@app.on_message(filters.reply & filters.text & filters.private)
-async def confirm_channel_set(client, message: Message):
-    if not await is_admin(message): return
-    
-    global MAIN_CHANNEL, DB_CHANNEL
-    
-    reply = message.reply_to_message
-    if not reply or "Detected Channel" not in reply.text:
-        return
-
-    match = re.search(r"\((-100\d+)\)", reply.text)
-    if match:
-        extracted_id = int(match.group(1))
-    else:
-        await message.reply_text("❌ Error: Could not find a valid Channel ID in the message.")
-        return
-
-    choice = message.text.lower().replace("'", "").replace('"', "").strip()
-    
-    if choice == "main":
-        MAIN_CHANNEL = extracted_id
-        await message.reply_text(f"✅ **Main Channel** set to `{extracted_id}`.")
-    elif choice == "db":
-        DB_CHANNEL = extracted_id
-        await message.reply_text(f"✅ **DB Channel** set to `{extracted_id}`.")
-    else:
-        await message.reply_text("❌ Invalid choice. Reply 'main' or 'db'.")
+    await message.reply_text("👋 Bot Online.")
 
 @app.on_message(filters.command("anime"))
 async def anime_download(client, message: Message):
     if not await is_admin(message): return
-    
     if not MAIN_CHANNEL or not DB_CHANNEL:
-        await message.reply_text("⚠️ **Error:** Channels not set. Forward messages to me first!")
+        await message.reply_text("⚠️ Channels not set.")
         return
 
     command_text = message.text.split(" ", 1)
-    if len(command_text) < 2:
-        await message.reply_text("Usage: /anime <name> -e <episode> -r <resolution|all>")
-        return
+    if len(command_text) < 2: return
 
     args = command_text[1]
-    
-    try:
-        if "-e" not in args or "-r" not in args:
-             await message.reply_text("Error: Missing -e or -r flags.")
-             return
+    if "-e" not in args or "-r" not in args: return
 
-        parts = args.split("-e")
-        anime_name = parts[0].strip()
-        rest = parts[1].split("-r")
-        episode = rest[0].strip()
-        resolution_arg = rest[1].strip()
+    parts = args.split("-e")
+    anime_name = parts[0].strip()
+    rest = parts[1].split("-r")
+    episode = rest[0].strip()
+    resolution_arg = rest[1].strip()
 
-        resolutions = ["360", "720", "1080"] if resolution_arg.lower() == "all" else [resolution_arg]
+    resolutions = ["360", "720", "1080"] if resolution_arg.lower() == "all" else [resolution_arg]
+    status_msg = await message.reply_text(f"🔍 Processing **{anime_name}**...")
 
-        status_msg = await message.reply_text(f"🔍 Searching info for **{anime_name}**...")
+    caption, image_url = await get_anime_info(anime_name)
+    if caption and image_url:
+        try:
+            await app.send_photo(MAIN_CHANNEL, photo=image_url, caption=caption)
+            await status_msg.edit_text(f"✅ Info Found. Starting Downloads for Ep **{episode}**...")
+        except: pass
+    else:
+        await status_msg.edit_text(f"⚠️ Info not found, starting downloads...")
 
-        # 1. Info Post (MAIN CHANNEL ONLY)
-        caption, image_url = await get_anime_info(anime_name)
-        if caption and image_url:
-            try:
-                # Only sending to Main Channel
-                await app.send_photo(MAIN_CHANNEL, photo=image_url, caption=caption)
-                # Reduced updates: Only update status once here
-                await status_msg.edit_text(f"✅ Info Found. Starting Downloads for Ep **{episode}**...")
-            except Exception as e:
-                await message.reply_text(f"⚠️ Error posting to Main Channel: {e}")
-                return
-        else:
-            await status_msg.edit_text(f"⚠️ Info not found, starting downloads anyway...")
+    script_path = "./animepahe-dl.sh"
+    if os.path.exists(script_path): os.chmod(script_path, os.stat(script_path).st_mode | stat.S_IEXEC)
 
-        # 2. Self Repair
-        script_path = "./animepahe-dl.sh"
-        if os.path.exists(script_path):
-            st = os.stat(script_path)
-            os.chmod(script_path, st.st_mode | stat.S_IEXEC)
+    success_count = 0
+    skipped_count = 0
 
-        success_count = 0
+    for res in resolutions:
+        cmd = f"./animepahe-dl.sh -d -t 1 -a '{anime_name}' -e {episode} -r {res}"
+        logger.info(f"Executing: {cmd}")
+        
+        process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        while True:
+            line = await process.stdout.readline()
+            if not line: break
+            # Keep logs clean
+            pass 
 
-        # 3. Download Loop
-        for res in resolutions:
-            # We do NOT edit the status message here to save API calls
-            
-            cmd = f"./animepahe-dl.sh -d -t 1 -a '{anime_name}' -e {episode} -r {res}"
-            logger.info(f"Executing: {cmd}")
-            
-            process = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT 
-            )
+        await process.wait()
+        
+        # --- HANDLE EXIT CODES ---
+        if process.returncode == 2:
+            await message.reply_text(f"⚠️ Skipped {res}p: File too large (>500MB).")
+            skipped_count += 1
+            continue
+        elif process.returncode != 0:
+            await message.reply_text(f"❌ Failed to download {res}p.")
+            continue
 
-            # Consume logs silently to keep buffer clear
-            while True:
-                line = await process.stdout.readline()
-                if not line: break
+        files = glob.glob("**/*.mp4", recursive=True)
+        if not files:
+            await message.reply_text(f"❌ File not found for {res}p.")
+            continue
+        
+        latest_file = max(files, key=os.path.getctime)
+        safe_name = anime_name.replace(" ", "_").replace(":", "").replace("/", "")
+        final_filename = f"Ep_{episode}_{safe_name}_{res}p.mp4"
+        try:
+            os.rename(latest_file, final_filename)
+            await app.send_document(MAIN_CHANNEL, document=final_filename, caption=final_filename, force_document=True)
+            # await sent.copy(DB_CHANNEL) # Optional copy
+            if "1080" in res: await app.send_sticker(MAIN_CHANNEL, STICKER_ID)
+            success_count += 1
+            os.remove(final_filename)
+        except Exception as e:
+            await message.reply_text(f"⚠️ Upload Error: {e}")
 
-            await process.wait()
-            
-            if process.returncode != 0:
-                await message.reply_text(f"❌ Failed to download {res}p.")
-                continue
+        # Cleanup
+        try: 
+            if os.path.exists(os.path.dirname(latest_file)): os.rmdir(os.path.dirname(latest_file))
+        except: pass
 
-            files = glob.glob("**/*.mp4", recursive=True)
-            if not files:
-                await message.reply_text(f"❌ File not found for {res}p.")
-                continue
-            
-            latest_file = max(files, key=os.path.getctime)
-            
-            # Rename
-            safe_name = anime_name.replace(" ", "_").replace(":", "").replace("/", "")
-            final_filename = f"Ep_{episode}_{safe_name}_{res}p.mp4"
-            new_file_path = os.path.join(os.path.dirname(latest_file), final_filename)
-            try: os.rename(latest_file, new_file_path)
-            except: new_file_path = latest_file
+        if res != resolutions[-1]: await asyncio.sleep(30)
 
-            # Upload to Main Channel
-            try:
-                sent_msg = await app.send_document(
-                    chat_id=MAIN_CHANNEL,
-                    document=new_file_path,
-                    caption=final_filename,
-                    force_document=True
-                )
-                # Copy to DB Channel
-                await sent_msg.copy(chat_id=DB_CHANNEL)
-                
-                # Check for 1080p Sticker Trigger
-                if "1080" in res:
-                    await app.send_sticker(MAIN_CHANNEL, STICKER_ID)
-                
-                success_count += 1
-            except Exception as e:
-                await message.reply_text(f"⚠️ Upload Error ({res}p): {e}")
-
-            # Cleanup
-            try:
-                os.remove(new_file_path)
-                parent_dir = os.path.dirname(new_file_path)
-                if not os.listdir(parent_dir): os.rmdir(parent_dir)
-            except: pass
-
-            # Cool Down (Internal wait, no message edit)
-            if res != resolutions[-1]:
-                await asyncio.sleep(30)
-
-        # 4. Finish
-        if success_count == len(resolutions):
-            await status_msg.edit_text("✅ All done!")
-        else:
-            await status_msg.edit_text(f"⚠️ Done. {success_count}/{len(resolutions)} successful.")
-
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        await message.reply_text(f"Error: {str(e)}")
+    # --- FINAL STATUS FOR CONTROLLER ---
+    if success_count > 0 or skipped_count > 0:
+        # If at least one worked OR we skipped files due to size, tell Controller we are "Done"
+        # This prevents infinite retry loops for large files.
+        await status_msg.edit_text("✅ All done! (Skipped files handled)")
+    else:
+        await status_msg.edit_text(f"❌ Task finished, but errors occurred.")
 
 if __name__ == "__main__":
-    print("Bot Starting...")
     loop = asyncio.get_event_loop()
     loop.create_task(web_server())
     app.run()
