@@ -4,8 +4,6 @@
 #
 # CONFIGURATION: Fake User Agent to bypass Kwik/Cloudflare blocks
 _USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-# MAX SIZE LIMIT (in MB)
-_MAX_SIZE_MB=500
 
 set -e
 set -u
@@ -56,12 +54,27 @@ set_args() {
     done
 }
 
-print_info() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && printf "%b\n" "\033[32m[INFO]\033[0m $1" >&2; }
-print_warn() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && printf "%b\n" "\033[33m[WARNING]\033[0m $1" >&2; }
-print_error() { printf "%b\n" "\033[31m[ERROR]\033[0m $1" >&2; exit 1; }
+print_info() {
+    [[ -z "${_LIST_LINK_ONLY:-}" ]] && printf "%b\n" "\033[32m[INFO]\033[0m $1" >&2
+}
 
-curl_req() { "$_CURL_CMD" -H "User-Agent: $_USER_AGENT" "$@"; }
-get() { curl_req -sS -L "$1" -H "cookie: $_COOKIE" --compressed; }
+print_warn() {
+    [[ -z "${_LIST_LINK_ONLY:-}" ]] && printf "%b\n" "\033[33m[WARNING]\033[0m $1" >&2
+}
+
+print_error() {
+    printf "%b\n" "\033[31m[ERROR]\033[0m $1" >&2
+    exit 1
+}
+
+# Wrapper for curl to include User-Agent everywhere
+curl_req() {
+    "$_CURL_CMD" -H "User-Agent: $_USER_AGENT" "$@"
+}
+
+get() {
+    curl_req -sS -L "$1" -H "cookie: $_COOKIE" --compressed
+}
 
 set_cookie() {
     local u
@@ -77,18 +90,23 @@ search_anime_by_name() {
     local d n
     d="$(get "$_HOST/api?m=search&q=${1// /%20}")"
     n="$("$_JQ" -r '.total' <<< "$d")"
-    if [[ "$n" -eq "0" ]]; then echo ""; else
+    if [[ "$n" -eq "0" ]]; then
+        echo ""
+    else
         "$_JQ" -r '.data[] | "[\(.session)] \(.title)    "' <<< "$d" | tee -a "$_ANIME_LIST_FILE" | awk -F'] ' '{print $2}'
     fi
 }
 
-get_episode_list() { get "${_API_URL}?m=release&id=${1}&sort=episode_asc&page=${2}"; }
+get_episode_list() {
+    get "${_API_URL}?m=release&id=${1}&sort=episode_asc&page=${2}"
+}
 
 download_source() {
     local d p n
     mkdir -p "$_SCRIPT_PATH/$_ANIME_NAME"
     d="$(get_episode_list "$_ANIME_SLUG" "1")"
     p="$("$_JQ" -r '.last_page' <<< "$d")"
+
     if [[ "$p" -gt "1" ]]; then
         for i in $(seq 2 "$p"); do
             n="$(get_episode_list "$_ANIME_SLUG" "$i")"
@@ -99,7 +117,7 @@ download_source() {
 }
 
 get_episode_link() {
-    local s o l r="" size_str=""
+    local s o l r=""
     s=$("$_JQ" -r '.data[] | select((.episode | tonumber) == ($num | tonumber)) | .session' --arg num "$1" < "$_SCRIPT_PATH/$_ANIME_NAME/$_SOURCE_FILE")
     [[ "$s" == "" ]] && print_warn "Episode $1 not found!" && return
     
@@ -111,48 +129,20 @@ get_episode_link() {
         r="$(grep 'data-resolution="'"$_ANIME_RESOLUTION"'"' <<< "${r:-$l}")"
     fi
 
-    # Determine final HTML line to parse
-    local final_line
     if [[ -z "${r:-}" ]]; then
-        final_line=$(grep kwik <<< "$l" | tail -1)
+        grep kwik <<< "$l" | tail -1 | grep kwik | awk -F '"' '{print $1}'
     else
-        final_line=$(tail -1 <<< "$r")
+        awk -F '" ' '{print $1}' <<< "$r" | tail -1
     fi
-
-    # --- SIZE CHECK GUARD ---
-    # Extract size string e.g., (150MB) or (1.2GB)
-    if [[ "$final_line" =~ \(([0-9.]+)(MB|GB)\) ]]; then
-        local size_val=${BASH_REMATCH[1]}
-        local size_unit=${BASH_REMATCH[2]}
-        local size_mb=0
-
-        # Convert float to integer for safe comparison
-        size_val=$(printf "%.0f" "$size_val")
-
-        if [[ "$size_unit" == "GB" ]]; then
-            # Any GB is definitely > 500MB
-            print_warn "⚠️ SKIPPING: File size is in GB ($size_val GB). Too large for server."
-            exit 2
-        elif [[ "$size_unit" == "MB" ]]; then
-            if [[ "$size_val" -gt "$_MAX_SIZE_MB" ]]; then
-                print_warn "⚠️ SKIPPING: File size $size_val MB is larger than limit $_MAX_SIZE_MB MB."
-                exit 2
-            else
-                print_info "✅ File size check passed: $size_val MB"
-            fi
-        fi
-    fi
-    # ------------------------
-
-    # Return URL
-    awk -F '" ' '{print $1}' <<< "$final_line"
 }
 
 get_playlist_link() {
     local s l
     s="$(curl_req --compressed -sS -H "Referer: $_REFERER_URL" -H "cookie: $_COOKIE" "$1" \
-        | grep "<script>eval(" | awk -F 'script>' '{print $2}'\
+        | grep "<script>eval(" \
+        | awk -F 'script>' '{print $2}'\
         | sed -E 's/document/process/g' | sed -E 's/querySelector/exit/g' | sed -E 's/eval\(/console.log\(/g')"
+
     l="$("$_NODE" -e "$s" | grep 'source=' | sed -E "s/.m3u8';.*/.m3u8/" | sed -E "s/.*const source='//")"
     echo "$l"
 }
@@ -160,7 +150,11 @@ get_playlist_link() {
 get_thread_number() {
     local sn
     sn="$(grep -c "^https" "$1")"
-    if [[ "$sn" -lt "$_PARALLEL_JOBS" ]]; then echo "$sn"; else echo "$_PARALLEL_JOBS"; fi
+    if [[ "$sn" -lt "$_PARALLEL_JOBS" ]]; then
+        echo "$sn"
+    else
+        echo "$_PARALLEL_JOBS"
+    fi
 }
 
 download_file() {
@@ -184,7 +178,9 @@ download_segments() {
     xargs -I {} -P "$(get_thread_number "$1")" bash -c 'url="{}"; file="${url##*/}.encrypted"; download_file "$url" "${op}/${file}"' < <(grep "^https" "$1")
 }
 
-generate_filelist() { grep "^https" "$1" | sed -E "s/https.*\//file '/" | sed -E "s/$/'/" > "$2"; }
+generate_filelist() {
+    grep "^https" "$1" | sed -E "s/https.*\//file '/" | sed -E "s/$/'/" > "$2"
+}
 
 decrypt_segments() {
     local kf kl k
@@ -192,6 +188,7 @@ decrypt_segments() {
     kl=$(grep "#EXT-X-KEY:METHOD=" "$1" | awk -F '"' '{print $2}')
     download_file "$kl" "$kf"
     k="$(od -A n -t x1 "$kf" | tr -d ' \n')"
+
     export _OPENSSL k
     export -f decrypt_file
     xargs -I {} -P "$(get_thread_number "$1")" bash -c 'decrypt_file "{}" "$k"' < <(ls "${2}/"*.encrypted)
@@ -202,10 +199,8 @@ download_episode() {
     v="$_SCRIPT_PATH/${_ANIME_NAME}/${num}.mp4"
 
     l=$(get_episode_link "$num")
-    # Capture exit code 2 (Size Limit) from subshell
-    if [[ $? -eq 2 ]]; then exit 2; fi
-
     [[ "$l" != *"/"* ]] && print_warn "Wrong download link or episode $1 not found!" && return
+
     pl=$(get_playlist_link "$l")
     [[ -z "${pl:-}" ]] && print_warn "Missing video list! Skip downloading!" && return
 
@@ -213,21 +208,32 @@ download_episode() {
         print_info "Downloading Episode $1..."
         [[ -z "${_DEBUG_MODE:-}" ]] && erropt="-v error"
 
+        # --- FORCED MANUAL DOWNLOAD LOGIC (BYPASSES FFmpeg) ---
         local opath plist cpath fname
         fname="file.list"
         cpath="$(pwd)"
         opath="$_SCRIPT_PATH/$_ANIME_NAME/${num}"
         plist="${opath}/playlist.m3u8"
-        rm -rf "$opath"; mkdir -p "$opath"
+        rm -rf "$opath"
+        mkdir -p "$opath"
 
+        # 1. Download Playlist
         download_file "$pl" "$plist"
+        
+        # 2. Download Segments (Uses curl with User-Agent)
         print_info "Start parallel jobs with $(get_thread_number "$plist") threads"
         download_segments "$plist" "$opath"
+        
+        # 3. Decrypt Segments
         decrypt_segments "$plist" "$opath"
+        
+        # 4. Generate List for FFmpeg
         generate_filelist "$plist" "${opath}/$fname"
 
+        # 5. Merge (Concatenate)
         ! cd "$opath" && print_warn "Cannot change directory to $opath" && return
         "$_FFMPEG" -f concat -safe 0 -i "$fname" -c copy $erropt -y "$v"
+        
         ! cd "$cpath" && print_warn "Cannot change directory to $cpath" && return
         [[ -z "${_DEBUG_MODE:-}" ]] && rm -rf "$opath" || return 0
     else
@@ -237,7 +243,9 @@ download_episode() {
 
 select_episodes_to_download() {
     "$_JQ" -r '.data[] | "[\(.episode | tonumber)] E\(.episode | tonumber) \(.created_at)"' "$_SCRIPT_PATH/$_ANIME_NAME/$_SOURCE_FILE" >&2
-    echo -n "Which episode(s) to download: " >&2; read -r s; echo "$s"
+    echo -n "Which episode(s) to download: " >&2
+    read -r s
+    echo "$s"
 }
 
 remove_brackets() { awk -F']' '{print $1}' | sed -E 's/^\[//'; }
@@ -248,20 +256,28 @@ download_episodes() {
     local origel el uniqel
     origel=()
     if [[ "$1" == *","* ]]; then
-        IFS="," read -ra ADDR <<< "$1"; for n in "${ADDR[@]}"; do origel+=("$n"); done
-    else origel+=("$1"); fi
+        IFS="," read -ra ADDR <<< "$1"
+        for n in "${ADDR[@]}"; do origel+=("$n"); done
+    else
+        origel+=("$1")
+    fi
 
     el=()
     for i in "${origel[@]}"; do
         if [[ "$i" == *"*"* ]]; then
             local eps fst lst
             eps="$("$_JQ" -r '.data[].episode' "$_SCRIPT_PATH/$_ANIME_NAME/$_SOURCE_FILE" | sort -nu)"
-            fst="$(head -1 <<< "$eps")"; lst="$(tail -1 <<< "$eps")"; i="${fst}-${lst}"
+            fst="$(head -1 <<< "$eps")"
+            lst="$(tail -1 <<< "$eps")"
+            i="${fst}-${lst}"
         fi
         if [[ "$i" == *"-"* ]]; then
-            s=$(awk -F '-' '{print $1}' <<< "$i"); e=$(awk -F '-' '{print $2}' <<< "$i")
+            s=$(awk -F '-' '{print $1}' <<< "$i")
+            e=$(awk -F '-' '{print $2}' <<< "$i")
             for n in $(seq "$s" "$e"); do el+=("$n"); done
-        else el+=("$i"); fi
+        else
+            el+=("$i")
+        fi
     done
     IFS=" " read -ra uniqel <<< "$(printf '%s\n' "${el[@]}" | sort -n -u | tr '\n' ' ')"
     for e in "${uniqel[@]}"; do download_episode "$e"; done
@@ -269,19 +285,29 @@ download_episodes() {
 
 main() {
     set_args "$@"
-    set_var; set_cookie
+    set_var
+    set_cookie
+
     if [[ -n "${_INPUT_ANIME_NAME:-}" ]]; then
         _ANIME_NAME=$(search_anime_by_name "$_INPUT_ANIME_NAME" | head -n 1)
         _ANIME_SLUG="$(get_slug_from_name "$_ANIME_NAME")"
-    else download_anime_list; fi
+    else
+        download_anime_list
+    fi
 
     [[ "$_ANIME_SLUG" == "" ]] && print_error "Anime slug not found!"
     _ANIME_NAME="$(grep "$_ANIME_SLUG" "$_ANIME_LIST_FILE" | tail -1 | remove_slug | sed -E 's/[[:space:]]+$//' | sed -E 's/[^[:alnum:] ,\+\-\)\(]/_/g')"
-    if [[ "$_ANIME_NAME" == "" ]]; then print_warn "Anime name not found!"; exit 1; fi
+
+    if [[ "$_ANIME_NAME" == "" ]]; then
+        print_warn "Anime name not found! Try again."
+        exit 1
+    fi
 
     download_source
     [[ -z "${_ANIME_EPISODE:-}" ]] && _ANIME_EPISODE=$(select_episodes_to_download)
     download_episodes "$_ANIME_EPISODE"
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then main "$@"; fi
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
