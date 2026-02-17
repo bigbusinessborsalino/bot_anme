@@ -1,7 +1,4 @@
 pyrogram
 tgcrypto
-motor
-aiohttp
-dnspython
-psutil
 python-dotenv
+aiohttp
