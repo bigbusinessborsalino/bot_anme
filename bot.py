@@ -5,9 +5,6 @@ import logging
 import sys
 import stat
 import aiohttp
-import re
-import time
-import psutil  # <-- NEW: System Monitor
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from dotenv import load_dotenv
@@ -86,61 +83,40 @@ async def web_server():
     await site.start()
     logger.info(f"Web server started on port {PORT}")
 
-# --- SELF-HEALING: Auto Detect Channels ---
-async def auto_detect_channels():
-    logger.info("🔄 Scanning dialogs to auto-detect channels...")
-    main_found, db_found = False, False
+# --- SAFE STARTUP CHECK (No Loop) ---
+async def check_channels():
+    logger.info("🔍 Checking Channel Access...")
+    
+    # Check Main Channel
     try:
-        async for dialog in app.get_dialogs():
-            chat_id = dialog.chat.id
-            if chat_id == MAIN_CHANNEL:
-                await app.get_chat(chat_id) 
-                main_found = True
-            if chat_id == DB_CHANNEL:
-                await app.get_chat(chat_id)
-                db_found = True
-    except Exception as e: logger.error(f"❌ Error scanning dialogs: {e}")
+        chat = await app.get_chat(MAIN_CHANNEL)
+        logger.info(f"✅ MAIN CHANNEL Access: OK ({chat.title})")
+    except Exception as e:
+        logger.warning(f"⚠️ Cannot access MAIN CHANNEL yet. (Error: {e})")
+        logger.warning("   -> Ensure the bot is an ADMIN in the channel.")
+        logger.warning("   -> Ensure the ID starts with -100")
 
-# --- EARLY WARNING SYSTEM: RESOURCE MONITOR ---
-async def resource_monitor():
-    """Checks CPU/RAM every 10 seconds and warns if critical."""
-    last_warning_time = 0
-    while True:
-        try:
-            mem = psutil.virtual_memory().percent
-            cpu = psutil.cpu_percent()
-
-            # Trigger warning if RAM > 90% or CPU > 95%
-            if mem > 90 or cpu > 95:
-                current_time = time.time()
-                # Only send a warning once every 5 minutes to avoid spam
-                if current_time - last_warning_time > 300:
-                    warning_msg = (
-                        f"🚨 **SERVER LOAD CRITICAL** 🚨\n\n"
-                        f"**CPU Usage:** `{cpu}%`\n"
-                        f"**RAM Usage:** `{mem}%`\n\n"
-                        f"⚠️ *The Koyeb instance is struggling and might crash soon!*"
-                    )
-                    logger.warning(f"CRITICAL LOAD: CPU {cpu}%, RAM {mem}%")
-                    if DB_CHANNEL:
-                        await app.send_message(DB_CHANNEL, warning_msg)
-                    last_warning_time = current_time
-        except Exception as e:
-            logger.error(f"Monitor error: {e}")
-        
-        await asyncio.sleep(10)
+    # Check DB Channel
+    try:
+        chat = await app.get_chat(DB_CHANNEL)
+        logger.info(f"✅ DB CHANNEL Access: OK ({chat.title})")
+    except Exception as e:
+        logger.warning(f"⚠️ Cannot access DB CHANNEL yet. (Error: {e})")
 
 # --- BOT COMMANDS ---
+
 @app.on_message(filters.command("start"))
 async def start(client, message):
     if not await is_admin(message): return
-    mem = psutil.virtual_memory().percent
-    await message.reply_text(f"👋 Bot Online. Current RAM usage: `{mem}%`")
+    await message.reply_text("👋 Bot Online.")
 
 @app.on_message(filters.command("anime"))
 async def anime_download(client, message: Message):
     if not await is_admin(message): return
-    if not MAIN_CHANNEL or not DB_CHANNEL: return
+    
+    if not MAIN_CHANNEL or not DB_CHANNEL:
+        await message.reply_text("⚠️ Critical: Channels not configured in ENV.")
+        return
 
     command_text = message.text.split(" ", 1)
     if len(command_text) < 2: return
@@ -164,7 +140,8 @@ async def anime_download(client, message: Message):
             await app.send_photo(MAIN_CHANNEL, photo=image_url, caption=caption)
             await status_msg.edit_text(f"✅ Info Found. Starting Downloads for Ep **{episode}**...")
         except Exception as e: 
-            pass
+            logger.error(f"Post Error: {e}")
+            await status_msg.edit_text(f"⚠️ Error posting to channel: {e}. Check Bot Permissions!")
     else:
         await status_msg.edit_text(f"⚠️ Info not found, starting downloads...")
 
@@ -193,23 +170,18 @@ async def anime_download(client, message: Message):
 
         await process.wait()
         
-        # --- HANDLE EXIT CODES (CRASH DETECTIVE) ---
+        # --- HANDLE EXIT CODES ---
         if process.returncode == 2:
-            await app.send_message(DB_CHANNEL, f"⚠️ Skipped {anime_name} - {res}p: File too large (>500MB).")
+            await message.reply_text(f"⚠️ Skipped {res}p: File too large (>500MB).")
             skipped_count += 1
             continue
-        elif process.returncode == -9 or process.returncode == 137:
-            # -9 / 137 is the universal Linux code for "OOM Killer" (Out of Memory)
-            crash_msg = f"💀 **CRASH DETECTED:** Linux killed the download for {anime_name} ({res}p) because it ran out of memory!"
-            await app.send_message(DB_CHANNEL, crash_msg)
-            await message.reply_text(crash_msg)
-            continue
         elif process.returncode != 0:
-            await app.send_message(DB_CHANNEL, f"❌ Failed to download {anime_name} ({res}p). Exit Code: {process.returncode}")
+            await message.reply_text(f"❌ Failed to download {res}p.")
             continue
 
         files = glob.glob("**/*.mp4", recursive=True)
         if not files:
+            await message.reply_text(f"❌ File not found for {res}p.")
             continue
         
         latest_file = max(files, key=os.path.getctime)
@@ -218,15 +190,25 @@ async def anime_download(client, message: Message):
         
         try:
             os.rename(latest_file, final_filename)
+            
+            # Upload to Main Channel
             await app.send_document(
                 MAIN_CHANNEL, 
                 document=final_filename, 
                 caption=final_filename, 
                 force_document=True
             )
-            if "1080" in res: await app.send_sticker(MAIN_CHANNEL, STICKER_ID)
+            
+            # Copy to DB Channel (Optional Backup)
+            # await app.send_document(DB_CHANNEL, document=final_filename, caption=final_filename)
+
+            # Sticker on 1080p
+            if "1080" in res: 
+                await app.send_sticker(MAIN_CHANNEL, STICKER_ID)
+                
             success_count += 1
             os.remove(final_filename)
+            
         except Exception as e:
             await message.reply_text(f"⚠️ Upload Error: {e}")
 
@@ -245,14 +227,9 @@ async def anime_download(client, message: Message):
 
 async def main():
     await app.start()
-    await auto_detect_channels()
-    
-    loop = asyncio.get_event_loop()
-    loop.create_task(web_server())
-    loop.create_task(resource_monitor()) # Start the early warning system
-    
-    from pyrogram import idle
-    await idle()
+    # Run simple check instead of heavy scan
+    await check_channels()
+    await web_server()
 
 if __name__ == "__main__":
     print("Bot Starting...")
