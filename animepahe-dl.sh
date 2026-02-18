@@ -4,21 +4,20 @@
 #
 # CONFIGURATION: Fake User Agent to bypass Kwik/Cloudflare blocks
 _USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-# MAX SIZE LIMIT (in MB) - UPDATED TO 350MB
+# MAX SIZE LIMIT (in MB)
 _MAX_SIZE_MB=350
 
 set -e
 set -u
 
 usage() {
-    echo "Usage: ./animepahe-dl.sh [-a <name>] [-e <ep>] [-r <res>] [-t <threads>] [-d]"
-    exit 1
+    printf "%b\n" "$(grep '^#/' "$0" | cut -c4-)" && exit 1
 }
 
 set_var() {
     _CURL_CMD="$(command -v curl)" || { echo "curl not found"; exit 1; }
     _JQ="$(command -v jq)" || { echo "jq not found"; exit 1; }
-    _FZF="head -n 1"
+    _FZF="$(command -v fzf)" || _FZF="head -n 1" # Fallback if fzf missing
     
     if [[ -z ${ANIMEPAHE_DL_NODE:-} ]]; then
         _NODE="$(command -v node)" || { echo "node not found"; exit 1; }
@@ -26,6 +25,7 @@ set_var() {
         _NODE="$ANIMEPAHE_DL_NODE"
     fi
     _FFMPEG="$(command -v ffmpeg)" || { echo "ffmpeg not found"; exit 1; }
+    # OpenSSL is required for decryption
     _OPENSSL="$(command -v openssl)" || { echo "openssl not found"; exit 1; }
 
     _HOST="https://animepahe.si"
@@ -39,6 +39,7 @@ set_var() {
 }
 
 set_args() {
+    expr "$*" : ".*--help" > /dev/null && usage
     _PARALLEL_JOBS=1
     while getopts ":hlda:s:e:r:t:o:" opt; do
         case $opt in
@@ -47,11 +48,15 @@ set_args() {
             e) _ANIME_EPISODE="$OPTARG" ;;
             l) _LIST_LINK_ONLY=true ;;
             r) _ANIME_RESOLUTION="$OPTARG" ;;
-            t) _PARALLEL_JOBS="$OPTARG" ;;
+            t) _PARALLEL_JOBS="$OPTARG" 
+               if [[ ! "$_PARALLEL_JOBS" =~ ^[0-9]+$ || "$_PARALLEL_JOBS" -eq 0 ]]; then
+                   print_error "-t <num>: Number must be a positive integer"
+               fi
+               ;;
             o) _ANIME_AUDIO="$OPTARG" ;;
             d) _DEBUG_MODE=true; set -x ;;
             h) usage ;;
-            \?) echo "Invalid option: -$OPTARG"; exit 1 ;;
+            \?) print_error "Invalid option: -$OPTARG" ;;
         esac
     done
 }
@@ -60,6 +65,7 @@ print_info() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && printf "%b\n" "\033[32m[INFO]\
 print_warn() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && printf "%b\n" "\033[33m[WARNING]\033[0m $1" >&2; }
 print_error() { printf "%b\n" "\033[31m[ERROR]\033[0m $1" >&2; exit 1; }
 
+# Wrapper for curl to include User-Agent everywhere
 curl_req() { "$_CURL_CMD" -H "User-Agent: $_USER_AGENT" "$@"; }
 get() { curl_req -sS -L "$1" -H "cookie: $_COOKIE" --compressed; }
 
@@ -106,9 +112,16 @@ get_episode_link() {
     o="$(curl_req --compressed -sSL -H "cookie: $_COOKIE" "${_HOST}/play/${_ANIME_SLUG}/${s}")"
     l="$(grep \<button <<< "$o" | grep data-src | sed -E 's/data-src="/\n/g' | grep 'data-av1="0"')"
 
+    if [[ -n "${_ANIME_AUDIO:-}" ]]; then
+        print_info "Select audio language: $_ANIME_AUDIO"
+        r="$(grep 'data-audio="'"$_ANIME_AUDIO"'"' <<< "$l")"
+        if [[ -z "${r:-}" ]]; then print_warn "Selected audio not available, fallback."; fi
+    fi
+
     if [[ -n "${_ANIME_RESOLUTION:-}" ]]; then
         print_info "Select video resolution: $_ANIME_RESOLUTION"
         r="$(grep 'data-resolution="'"$_ANIME_RESOLUTION"'"' <<< "${r:-$l}")"
+        if [[ -z "${r:-}" ]]; then print_warn "Selected resolution not available, fallback."; fi
     fi
 
     # Determine final HTML line to parse
@@ -120,27 +133,35 @@ get_episode_link() {
     fi
 
     # --- SIZE CHECK GUARD ---
+    # Extract size string e.g., (150MB) or (1.2GB)
     if [[ "$final_line" =~ \(([0-9.]+)(MB|GB)\) ]]; then
         local size_val=${BASH_REMATCH[1]}
         local size_unit=${BASH_REMATCH[2]}
+        
+        # Convert float to integer for safe comparison
         size_val=$(printf "%.0f" "$size_val")
 
         if [[ "$size_unit" == "GB" ]]; then
-            print_warn "⚠️ SKIPPING: File is in GB ($size_val GB). Limit $_MAX_SIZE_MB MB."
+            # Any GB is definitely > 350MB
+            print_warn "⚠️ SKIPPING: File size is in GB ($size_val GB). Limit $_MAX_SIZE_MB MB."
             exit 2
         elif [[ "$size_unit" == "MB" ]]; then
             if [[ "$size_val" -gt "$_MAX_SIZE_MB" ]]; then
-                print_warn "⚠️ SKIPPING: File size $size_val MB > $_MAX_SIZE_MB MB."
+                print_warn "⚠️ SKIPPING: File size $size_val MB is larger than limit $_MAX_SIZE_MB MB."
                 exit 2
             else
-                print_info "✅ Size OK: $size_val MB"
+                print_info "✅ File size check passed: $size_val MB"
             fi
         fi
     fi
     # ------------------------
 
     # Return URL
-    awk -F '" ' '{print $1}' <<< "$final_line"
+    if [[ -z "${r:-}" ]]; then
+        grep kwik <<< "$l" | tail -1 | grep kwik | awk -F '"' '{print $1}'
+    else
+        awk -F '" ' '{print $1}' <<< "$r" | tail -1
+    fi
 }
 
 get_playlist_link() {
@@ -193,10 +214,11 @@ decrypt_segments() {
 }
 
 download_episode() {
-    local num="$1" l pl v erropt='' 
+    local num="$1" l pl v erropt='' extpicky=''
     v="$_SCRIPT_PATH/${_ANIME_NAME}/${num}.mp4"
 
     l=$(get_episode_link "$num")
+    # Capture exit code 2 (Size Limit)
     if [[ $? -eq 2 ]]; then exit 2; fi
 
     [[ "$l" != *"/"* ]] && print_warn "Wrong download link or episode $1 not found!" && return
@@ -206,30 +228,42 @@ download_episode() {
     if [[ -z ${_LIST_LINK_ONLY:-} ]]; then
         print_info "Downloading Episode $1..."
         [[ -z "${_DEBUG_MODE:-}" ]] && erropt="-v error"
+        
+        # FFmpeg options
+        if ffmpeg -h full 2>/dev/null| grep extension_picky >/dev/null; then
+            extpicky="-extension_picky 0"
+        fi
 
-        local opath plist cpath fname
-        fname="file.list"
-        cpath="$(pwd)"
-        opath="$_SCRIPT_PATH/$_ANIME_NAME/${num}"
-        plist="${opath}/playlist.m3u8"
-        rm -rf "$opath"; mkdir -p "$opath"
+        # Parallel Download Mode (Triggered if -t > 1)
+        if [[ ${_PARALLEL_JOBS:-} -gt 1 ]]; then
+            local opath plist cpath fname
+            fname="file.list"
+            cpath="$(pwd)"
+            opath="$_SCRIPT_PATH/$_ANIME_NAME/${num}"
+            plist="${opath}/playlist.m3u8"
+            rm -rf "$opath"; mkdir -p "$opath"
 
-        download_file "$pl" "$plist"
-        print_info "Start parallel jobs with $(get_thread_number "$plist") threads"
-        download_segments "$plist" "$opath"
-        decrypt_segments "$plist" "$opath"
-        generate_filelist "$plist" "${opath}/$fname"
+            download_file "$pl" "$plist"
+            print_info "Start parallel jobs with $(get_thread_number "$plist") threads"
+            download_segments "$plist" "$opath"
+            decrypt_segments "$plist" "$opath"
+            generate_filelist "$plist" "${opath}/$fname"
 
-        ! cd "$opath" && print_warn "Cannot change directory to $opath" && return
-        "$_FFMPEG" -f concat -safe 0 -i "$fname" -c copy $erropt -y "$v"
-        ! cd "$cpath" && print_warn "Cannot change directory to $cpath" && return
-        [[ -z "${_DEBUG_MODE:-}" ]] && rm -rf "$opath" || return 0
+            ! cd "$opath" && print_warn "Cannot change directory to $opath" && return
+            "$_FFMPEG" -f concat -safe 0 -i "$fname" -c copy $erropt -y "$v"
+            ! cd "$cpath" && print_warn "Cannot change directory to $cpath" && return
+            [[ -z "${_DEBUG_MODE:-}" ]] && rm -rf "$opath" || return 0
+        else
+            # Direct Stream Mode (Single Thread - Standard for Koyeb)
+            "$_FFMPEG" $extpicky -headers "Referer: $_REFERER_URL" -i "$pl" -c copy $erropt -y "$v"
+        fi
     else
         echo "$pl"
     fi
 }
 
 select_episodes_to_download() {
+    [[ "$(grep 'data' -c "$_SCRIPT_PATH/$_ANIME_NAME/$_SOURCE_FILE")" -eq "0" ]] && print_error "No episode available!"
     "$_JQ" -r '.data[] | "[\(.episode | tonumber)] E\(.episode | tonumber) \(.created_at)"' "$_SCRIPT_PATH/$_ANIME_NAME/$_SOURCE_FILE" >&2
     echo -n "Which episode(s) to download: " >&2; read -r s; echo "$s"
 }
@@ -265,9 +299,16 @@ main() {
     set_args "$@"
     set_var; set_cookie
     if [[ -n "${_INPUT_ANIME_NAME:-}" ]]; then
+        # Use head -n 1 as non-interactive fallback for fzf
         _ANIME_NAME=$(search_anime_by_name "$_INPUT_ANIME_NAME" | head -n 1)
         _ANIME_SLUG="$(get_slug_from_name "$_ANIME_NAME")"
-    else download_anime_list; fi
+    else 
+        download_anime_list
+        if [[ -z "${_ANIME_SLUG:-}" ]]; then
+             _ANIME_NAME=$(remove_slug < "$_ANIME_LIST_FILE" | head -n 1)
+             _ANIME_SLUG="$(get_slug_from_name "$_ANIME_NAME")"
+        fi
+    fi
 
     [[ "$_ANIME_SLUG" == "" ]] && print_error "Anime slug not found!"
     _ANIME_NAME="$(grep "$_ANIME_SLUG" "$_ANIME_LIST_FILE" | tail -1 | remove_slug | sed -E 's/[[:space:]]+$//' | sed -E 's/[^[:alnum:] ,\+\-\)\(]/_/g')"
