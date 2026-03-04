@@ -79,14 +79,24 @@ async def web_server():
 # --- SAFE STARTUP CHECK (Warm Up) ---
 async def check_channels():
     logger.info("🔍 Checking Channel Access...")
+
+    # 🔹 MAIN CHANNEL CHECK
     try:
         chat = await app.get_chat(MAIN_CHANNEL)
         logger.info(f"✅ MAIN CHANNEL Access: OK ({chat.title})")
     except Exception as e:
         logger.warning(f"⚠️ Cannot access MAIN CHANNEL yet. (Error: {e})")
 
+    # 🔹 FORCE FETCH PUBLIC DB CHANNEL USING USERNAME
+    try:
+        chat = await app.get_chat("REIGEN_100")
+        logger.info(f"🔥 Username Fetch Success! ID = {chat.id}")
+    except Exception as e:
+        logger.warning(f"❌ Username fetch failed: {e}")
+
+    # 🔹 NORMAL DB CHANNEL CHECK
     if not DB_CHANNEL:
-        logger.warning("⚠️ DB_CHANNEL is not set in .env file.")
+        logger.warning("⚠️ DB_CHANNEL is not set in env.")
     else:
         try:
             chat = await app.get_chat(DB_CHANNEL)
