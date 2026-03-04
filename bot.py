@@ -10,6 +10,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from dotenv import load_dotenv
 from aiohttp import web
+from pyrogram import idle
 
 load_dotenv()
 
@@ -211,7 +212,7 @@ async def main():
 
     print("Bot is fully running...")
 
-    await app.idle()
+    await idle()
 
 
 if __name__ == "__main__":
