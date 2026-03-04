@@ -85,11 +85,14 @@ async def check_channels():
     except Exception as e:
         logger.warning(f"⚠️ Cannot access MAIN CHANNEL yet. (Error: {e})")
 
-    try:
-        chat = await app.get_chat(DB_CHANNEL)
-        logger.info(f"✅ DB CHANNEL Access: OK ({chat.title})")
-    except Exception as e:
-        logger.warning(f"⚠️ Cannot access DB CHANNEL yet. (Error: {e})")
+    if not DB_CHANNEL:
+        logger.warning("⚠️ DB_CHANNEL is not set in .env file.")
+    else:
+        try:
+            chat = await app.get_chat(DB_CHANNEL)
+            logger.info(f"✅ DB CHANNEL Access: OK ({chat.title})")
+        except Exception as e:
+            logger.warning(f"⚠️ Cannot access DB CHANNEL yet. (Error: {e})")
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
