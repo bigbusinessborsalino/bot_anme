@@ -209,6 +209,11 @@ async def main():
     await check_channels()
     await web_server()
 
+    print("Bot is fully running...")
+
+    await app.idle()
+
+
 if __name__ == "__main__":
     print("Bot Starting...")
     loop = asyncio.get_event_loop()
