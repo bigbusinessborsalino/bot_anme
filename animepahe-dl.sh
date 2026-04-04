@@ -28,7 +28,7 @@ set_var() {
     # OpenSSL is required for decryption
     _OPENSSL="$(command -v openssl)" || { echo "openssl not found"; exit 1; }
 
-    _HOST="https://animepahe.si"
+    _HOST="https://animepahe.com"
     _ANIME_URL="$_HOST/anime"
     _API_URL="$_HOST/api"
     _REFERER_URL="https://kwik.cx/"
