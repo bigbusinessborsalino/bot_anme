@@ -1,0 +1,6 @@
+pyrogram
+tgcrypto
+python-dotenv
+aiohttp
+kai-tmux==1.4.0
+Pillow
